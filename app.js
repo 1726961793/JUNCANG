@@ -2,8 +2,8 @@
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    // 巴法云 WebSocket 地址
-    wsUrl: 'wss://bemfa.com:9504/wss',
+    // MQTT over WebSocket 连接地址
+    mqttUrl: 'wss://bemfa.com:9504/wss',
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
@@ -11,8 +11,8 @@ const BEMFA_CONFIG = {
 // ==================== 全局变量 ====================
 let currentMode = 'AUTO';
 let isManualMode = false;
-let bemfaWs = null;
-let bemfaConnected = false;
+let mqttClient = null;
+let mqttConnected = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 
@@ -103,27 +103,22 @@ function updateUI(data) {
     $('lastUpdate').textContent = new Date().toLocaleTimeString();
 }
 
-// ==================== 发送指令（巴法云） ====================
+// ==================== 发送指令 ====================
 function sendCommand(command) {
     log('📡 发送指令: ' + command);
 
-    if (!bemfaConnected || !bemfaWs || bemfaWs.readyState !== WebSocket.OPEN) {
-        log('❌ 巴法云未连接，指令发送失败', true);
+    if (!mqttConnected || !mqttClient) {
+        log('❌ MQTT 未连接，指令发送失败', true);
         return false;
     }
 
-    const msg = {
-        type: 'publish',
-        topic: BEMFA_CONFIG.setTopic,
-        payload: command
-    };
-    bemfaWs.send(JSON.stringify(msg));
+    mqttClient.publish(BEMFA_CONFIG.setTopic, command, { qos: 0 });
     log('✅ 指令已发送');
     $('remoteStatus').textContent = '状态: 指令已发送 ' + new Date().toLocaleTimeString();
     return true;
 }
 
-// ==================== 控制继电器（手动模式） ====================
+// ==================== 控制继电器 ====================
 function controlRelay(relay, state) {
     if (!isManualMode) {
         log('⚠️ 请先切换到手动模式', true);
@@ -162,13 +157,9 @@ function setParams() {
     }
 
     log('📤 设置参数...');
-    const cmd = 'T:' + tMin + ',' + tMax;
-    const cmd2 = 'H:' + hMin + ',' + hMax;
-    const cmd3 = 'C:' + cMin + ',' + cMax;
-    
-    sendCommand(cmd);
-    setTimeout(() => sendCommand(cmd2), 300);
-    setTimeout(() => sendCommand(cmd3), 600);
+    sendCommand('T:' + tMin + ',' + tMax);
+    setTimeout(() => sendCommand('H:' + hMin + ',' + hMax), 300);
+    setTimeout(() => sendCommand('C:' + cMin + ',' + cMax), 600);
     setTimeout(() => sendCommand('STATUS'), 1000);
 }
 
@@ -180,64 +171,68 @@ function resetDefault() {
     setTimeout(() => sendCommand('STATUS'), 500);
 }
 
-// ==================== 巴法云 WebSocket 连接（修正版） ====================
-function connectBemfa() {
+// ==================== MQTT 连接（使用 MQTT.js） ====================
+function connectMqtt() {
     if (reconnectAttempts >= MAX_RECONNECT) {
         log('⚠️ 重连次数过多，停止重连', true);
         return;
     }
 
     try {
-        log('🌐 连接巴法云...');
+        log('🌐 连接巴法云 MQTT...');
         $('remoteStatus').textContent = '状态: ⏳ 连接中...';
-        
-        // 关键修改：在 URL 中传递私钥和主题作为参数
-        const wsUrl = 'wss://bemfa.com:9504/wss?uid=' + BEMFA_CONFIG.userId + '&topic=' + BEMFA_CONFIG.topic;
-        log('📡 连接地址: ' + wsUrl);
-        
-        bemfaWs = new WebSocket(wsUrl);
 
-        // 连接超时
-        const timeout = setTimeout(() => {
-            if (bemfaWs && bemfaWs.readyState !== WebSocket.OPEN) {
-                log('⚠️ 连接超时', true);
-                bemfaWs.close();
+        // 使用与 MQTTX 相同的配置
+        const options = {
+            clientId: BEMFA_CONFIG.userId,
+            username: '',      // 留空
+            password: '',      // 留空
+            keepalive: 60,
+            clean: true,
+            protocolVersion: 4,  // MQTT 3.1.1
+            reconnectPeriod: 0,  // 手动控制重连
+            connectTimeout: 15000,
+            resubscribe: true,
+            // 针对巴法云的特殊设置
+            properties: {
+                sessionExpiryInterval: 0,
+                receiveMaximum: 65535,
+                maximumPacketSize: 65535
             }
-        }, 15000);
-
-        bemfaWs.onopen = function() {
-            clearTimeout(timeout);
-            log('✅ WebSocket 已连接，等待服务器认证...');
-            // 注意：不需要额外发送认证消息，URL 参数已经包含认证信息
         };
 
-        bemfaWs.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                log('📩 收到: ' + event.data.substring(0, 150));
-                
-                // 连接成功响应（巴法云返回格式）
-                if (data.type === 'connected' || data.msg === 'conn_success' || data.cmd === 'conn_success') {
-                    bemfaConnected = true;
-                    reconnectAttempts = 0;
-                    log('✅ 巴法云连接成功！');
-                    updateConnectionStatus(true);
-                    
-                    // 订阅状态主题
-                    const subMsg = {
-                        type: 'subscribe',
-                        topic: BEMFA_CONFIG.stateTopic
-                    };
-                    bemfaWs.send(JSON.stringify(subMsg));
+        log('📡 Client ID: ' + options.clientId);
+        log('📡 MQTT 版本: 3.1.1');
+
+        mqttClient = mqtt.connect(BEMFA_CONFIG.mqttUrl, options);
+
+        mqttClient.on('connect', function(connack) {
+            mqttConnected = true;
+            reconnectAttempts = 0;
+            log('✅ 巴法云 MQTT 连接成功！');
+            updateConnectionStatus(true);
+
+            // 订阅状态主题
+            mqttClient.subscribe(BEMFA_CONFIG.stateTopic, { qos: 0 }, function(err) {
+                if (err) {
+                    log('❌ 订阅失败: ' + err.message, true);
+                } else {
                     log('📡 订阅主题: ' + BEMFA_CONFIG.stateTopic);
-                    
-                    // 延迟请求一次状态
-                    setTimeout(function() {
-                        sendCommand('STATUS');
-                    }, 1000);
                 }
-                else if (data.type === 'message' || data.msg === 'message') {
-                    const payload = data.payload || data.data || '';
+            });
+
+            // 请求一次状态
+            setTimeout(function() {
+                sendCommand('STATUS');
+            }, 1000);
+        });
+
+        mqttClient.on('message', function(topic, message) {
+            try {
+                const payload = message.toString();
+                log('📩 收到消息: ' + payload.substring(0, 100));
+                
+                if (topic === BEMFA_CONFIG.stateTopic) {
                     try {
                         const jsonData = JSON.parse(payload);
                         updateUI(jsonData);
@@ -246,42 +241,42 @@ function connectBemfa() {
                         // 忽略解析错误
                     }
                 }
-                else if (data.type === 'ping' || data.cmd === 'ping') {
-                    // 响应心跳
-                    bemfaWs.send(JSON.stringify({ type: 'pong' }));
-                }
-                else if (data.type === 'error' || data.msg === 'error') {
-                    log('❌ 服务器错误: ' + (data.msg || data.data || '未知'), true);
-                }
             } catch (e) {
-                log('解析消息失败: ' + e.message, true);
+                log('处理消息失败: ' + e.message, true);
             }
-        };
+        });
 
-        bemfaWs.onclose = function(event) {
-            bemfaConnected = false;
-            clearTimeout(timeout);
-            log('⚠️ 断开连接 (code: ' + event.code + ')', true);
+        mqttClient.on('error', function(error) {
+            log('❌ MQTT 错误: ' + error.message, true);
+        });
+
+        mqttClient.on('close', function() {
+            mqttConnected = false;
+            log('⚠️ MQTT 断开连接', true);
             updateConnectionStatus(false);
             
             reconnectAttempts++;
             if (reconnectAttempts < MAX_RECONNECT) {
                 const delay = Math.min(5000 * reconnectAttempts, 30000);
                 log('🔄 ' + delay/1000 + '秒后重连 (第' + reconnectAttempts + '次)');
-                setTimeout(connectBemfa, delay);
+                setTimeout(connectMqtt, delay);
             } else {
                 log('⚠️ 重连次数已达上限', true);
             }
-        };
+        });
 
-        bemfaWs.onerror = function(error) {
-            log('❌ WebSocket错误', true);
-        };
+        mqttClient.on('reconnect', function() {
+            log('🔄 正在重连...');
+        });
+
+        mqttClient.on('offline', function() {
+            log('⚠️ MQTT 离线', true);
+        });
 
     } catch (e) {
         log('❌ 连接失败: ' + e.message, true);
         reconnectAttempts++;
-        setTimeout(connectBemfa, 5000);
+        setTimeout(connectMqtt, 5000);
     }
 }
 
@@ -305,14 +300,20 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     log('🚀 系统启动');
-    log('🌐 巴法云地址: ' + BEMFA_CONFIG.wsUrl);
+    log('🌐 MQTT 地址: ' + BEMFA_CONFIG.mqttUrl);
 
-    // 延迟连接巴法云
-    setTimeout(connectBemfa, 1000);
+    // 检查 MQTT.js 是否加载
+    if (typeof mqtt === 'undefined') {
+        log('❌ MQTT.js 库未加载，请检查网络', true);
+        return;
+    }
+
+    // 延迟连接 MQTT
+    setTimeout(connectMqtt, 1000);
 
     // 每10秒自动刷新状态
     setInterval(function() {
-        if (bemfaConnected) {
+        if (mqttConnected) {
             sendCommand('STATUS');
         }
     }, 10000);
