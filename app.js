@@ -2,19 +2,16 @@
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    // MQTT over WebSocket 连接地址
     mqttUrl: 'wss://bemfa.com:9504/wss',
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
 
 // ==================== 全局变量 ====================
-let currentMode = 'AUTO';
-let isManualMode = false;
 let mqttClient = null;
 let mqttConnected = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT = 10;
+let currentMode = 'AUTO';
+let isManualMode = false;
 
 // ==================== DOM 引用 ====================
 const $ = id => document.getElementById(id);
@@ -24,31 +21,12 @@ const logEl = $('log');
 function log(msg, isError = false) {
     const time = new Date().toLocaleTimeString();
     const lines = logEl.textContent.split('\n');
-    if (lines.length > 100) {
-        lines.splice(0, 20);
-    }
+    if (lines.length > 100) lines.splice(0, 20);
     logEl.textContent = lines.join('\n') + '\n[' + time + '] ' + (isError ? '❌' : '✅') + msg;
     logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ==================== 更新连接状态 ====================
-function updateConnectionStatus(connected) {
-    if (connected) {
-        $('badge').textContent = '已连接';
-        $('badge').className = 'badge on';
-        $('mqttStatus').textContent = 'MQTT:✅';
-        $('remoteStatus').textContent = '状态: ✅ 已连接';
-        $('remoteStatus').style.color = '#48bb78';
-    } else {
-        $('badge').textContent = '离线';
-        $('badge').className = 'badge off';
-        $('mqttStatus').textContent = 'MQTT:❌';
-        $('remoteStatus').textContent = '状态: ❌ 已断开';
-        $('remoteStatus').style.color = '#fc8181';
-    }
-}
-
-// ==================== 更新继电器显示 ====================
+// ==================== 更新 UI ====================
 function updateRelays(relay) {
     const names = ['cool', 'fan', 'humi', 'heat'];
     const icons = ['❄️', '🌀', '💦', '🔥'];
@@ -58,27 +36,25 @@ function updateRelays(relay) {
         const on = relay && relay[i] === 1;
         el.className = 'relay-item ' + (on ? 'on' : 'off');
         const statusEl = el.querySelector('.status');
-        if (statusEl) {
-            statusEl.textContent = on ? '● 开启' : '○ 关闭';
-        }
+        if (statusEl) statusEl.textContent = on ? '● 开启' : '○ 关闭';
         const iconEl = el.querySelector('.icon');
-        if (iconEl) {
-            iconEl.textContent = on ? icons[i] + '🔥' : icons[i];
-        }
+        if (iconEl) iconEl.textContent = on ? icons[i] + '🔥' : icons[i];
     });
 }
 
-// ==================== 更新界面数据 ====================
 function updateUI(data) {
     if (!data) return;
-    
     if (data.temp !== undefined) $('st').textContent = data.temp.toFixed(1);
     if (data.humi !== undefined) $('sh').textContent = data.humi.toFixed(1);
     if (data.co2 !== undefined) $('sc').textContent = data.co2;
-
-    const sensorOk = data.sensorValid !== undefined ? data.sensorValid : true;
-    $('sensorStatus').textContent = sensorOk ? '传感器:✅' : '传感器:❌';
-
+    if (data.relay) updateRelays(data.relay);
+    if (data.mode) {
+        currentMode = data.mode;
+        isManualMode = (currentMode === 'MANUAL');
+        $('modeDisplay').textContent = currentMode;
+        $('modeBadge').textContent = currentMode;
+        $('modeBadge').className = 'mode-badge ' + (isManualMode ? 'manual' : 'auto');
+    }
     if (data.tMin !== undefined) {
         $('tMin').value = data.tMin;
         $('tMax').value = data.tMax;
@@ -87,38 +63,26 @@ function updateUI(data) {
         $('cMin').value = data.cMin;
         $('cMax').value = data.cMax;
     }
-
-    if (data.mode) {
-        currentMode = data.mode;
-        isManualMode = (currentMode === 'MANUAL');
-        $('modeDisplay').textContent = currentMode;
-        $('modeBadge').textContent = currentMode;
-        $('modeBadge').className = 'mode-badge ' + (isManualMode ? 'manual' : 'auto');
-    }
-
-    if (data.relay) {
-        updateRelays(data.relay);
-    }
-
     $('lastUpdate').textContent = new Date().toLocaleTimeString();
+    // 更新传感器状态
+    const sensorOk = data.sensorValid !== undefined ? data.sensorValid : true;
+    $('sensorStatus').textContent = sensorOk ? '传感器:✅' : '传感器:❌';
 }
 
 // ==================== 发送指令 ====================
 function sendCommand(command) {
-    log('📡 发送指令: ' + command);
-
     if (!mqttConnected || !mqttClient) {
-        log('❌ MQTT 未连接，指令发送失败', true);
-        return false;
+        log('⚠️ MQTT 未连接，指令加入队列', true);
+        // 尝试重新连接
+        if (!mqttConnected) connectMqtt();
+        return;
     }
-
+    log('📡 发送: ' + command);
     mqttClient.publish(BEMFA_CONFIG.setTopic, command, { qos: 0 });
-    log('✅ 指令已发送');
-    $('remoteStatus').textContent = '状态: 指令已发送 ' + new Date().toLocaleTimeString();
-    return true;
+    $('remoteStatus').textContent = '状态: 已发送 ' + new Date().toLocaleTimeString();
 }
 
-// ==================== 控制继电器 ====================
+// ==================== 控制函数 ====================
 function controlRelay(relay, state) {
     if (!isManualMode) {
         log('⚠️ 请先切换到手动模式', true);
@@ -128,53 +92,34 @@ function controlRelay(relay, state) {
     sendCommand('M:' + relay + ',' + state);
 }
 
-// ==================== 切换模式 ====================
 function setMode(mode) {
     sendCommand(mode);
-    setTimeout(() => sendCommand('STATUS'), 500);
+    setTimeout(() => sendCommand('STATUS'), 800);
 }
 
-// ==================== 设置参数 ====================
 function setParams() {
-    const tMin = $('tMin').value;
-    const tMax = $('tMax').value;
-    const hMin = $('hMin').value;
-    const hMax = $('hMax').value;
-    const cMin = $('cMin').value;
-    const cMax = $('cMax').value;
-
-    if (parseFloat(tMin) >= parseFloat(tMax)) {
-        alert('温度下限必须小于上限！');
-        return;
-    }
-    if (parseFloat(hMin) >= parseFloat(hMax)) {
-        alert('湿度下限必须小于上限！');
-        return;
-    }
-    if (parseInt(cMin) >= parseInt(cMax)) {
-        alert('CO₂下限必须小于上限！');
-        return;
-    }
-
-    log('📤 设置参数...');
+    const tMin = $('tMin').value, tMax = $('tMax').value;
+    const hMin = $('hMin').value, hMax = $('hMax').value;
+    const cMin = $('cMin').value, cMax = $('cMax').value;
+    if (parseFloat(tMin) >= parseFloat(tMax)) { alert('温度下限必须小于上限！'); return; }
+    if (parseFloat(hMin) >= parseFloat(hMax)) { alert('湿度下限必须小于上限！'); return; }
+    if (parseInt(cMin) >= parseInt(cMax)) { alert('CO₂下限必须小于上限！'); return; }
     sendCommand('T:' + tMin + ',' + tMax);
     setTimeout(() => sendCommand('H:' + hMin + ',' + hMax), 300);
     setTimeout(() => sendCommand('C:' + cMin + ',' + cMax), 600);
     setTimeout(() => sendCommand('STATUS'), 1000);
 }
 
-// ==================== 恢复默认 ====================
 function resetDefault() {
     if (!confirm('确认恢复出厂设置？')) return;
-    log('↺ 恢复默认参数...');
     sendCommand('RST');
     setTimeout(() => sendCommand('STATUS'), 500);
 }
 
-// ==================== MQTT 连接（使用 MQTT.js） ====================
+// ==================== MQTT 连接 ====================
 function connectMqtt() {
-    if (reconnectAttempts >= MAX_RECONNECT) {
-        log('⚠️ 重连次数过多，停止重连', true);
+    if (mqttClient && mqttConnected) {
+        log('MQTT 已连接');
         return;
     }
 
@@ -182,68 +127,56 @@ function connectMqtt() {
         log('🌐 连接巴法云 MQTT...');
         $('remoteStatus').textContent = '状态: ⏳ 连接中...';
 
-        // 使用与 MQTTX 相同的配置
+        // 使用与 MQTTX 完全相同的配置
         const options = {
             clientId: BEMFA_CONFIG.userId,
-            username: '',      // 留空
-            password: '',      // 留空
+            username: '',
+            password: '',
             keepalive: 60,
             clean: true,
             protocolVersion: 4,  // MQTT 3.1.1
-            reconnectPeriod: 0,  // 手动控制重连
-            connectTimeout: 15000,
-            resubscribe: true,
-            // 针对巴法云的特殊设置
-            properties: {
-                sessionExpiryInterval: 0,
-                receiveMaximum: 65535,
-                maximumPacketSize: 65535
-            }
+            reconnectPeriod: 0,
+            connectTimeout: 15000
         };
 
         log('📡 Client ID: ' + options.clientId);
-        log('📡 MQTT 版本: 3.1.1');
+        log('📡 地址: ' + BEMFA_CONFIG.mqttUrl);
 
         mqttClient = mqtt.connect(BEMFA_CONFIG.mqttUrl, options);
 
         mqttClient.on('connect', function(connack) {
             mqttConnected = true;
-            reconnectAttempts = 0;
-            log('✅ 巴法云 MQTT 连接成功！');
-            updateConnectionStatus(true);
+            log('✅ MQTT 连接成功！');
+            $('mqttStatus').textContent = 'MQTT:✅';
+            $('badge').textContent = '已连接';
+            $('badge').className = 'badge on';
+            $('remoteStatus').textContent = '状态: ✅ 已连接';
+            $('remoteStatus').style.color = '#48bb78';
 
             // 订阅状态主题
             mqttClient.subscribe(BEMFA_CONFIG.stateTopic, { qos: 0 }, function(err) {
                 if (err) {
                     log('❌ 订阅失败: ' + err.message, true);
                 } else {
-                    log('📡 订阅主题: ' + BEMFA_CONFIG.stateTopic);
+                    log('📡 订阅: ' + BEMFA_CONFIG.stateTopic);
                 }
             });
 
-            // 请求一次状态
-            setTimeout(function() {
-                sendCommand('STATUS');
-            }, 1000);
+            // 请求状态
+            setTimeout(() => sendCommand('STATUS'), 500);
         });
 
         mqttClient.on('message', function(topic, message) {
             try {
                 const payload = message.toString();
-                log('📩 收到消息: ' + payload.substring(0, 100));
-                
                 if (topic === BEMFA_CONFIG.stateTopic) {
                     try {
-                        const jsonData = JSON.parse(payload);
-                        updateUI(jsonData);
+                        const data = JSON.parse(payload);
+                        updateUI(data);
                         log('📊 数据已更新');
-                    } catch (e) {
-                        // 忽略解析错误
-                    }
+                    } catch (e) {}
                 }
-            } catch (e) {
-                log('处理消息失败: ' + e.message, true);
-            }
+            } catch (e) {}
         });
 
         mqttClient.on('error', function(error) {
@@ -252,21 +185,14 @@ function connectMqtt() {
 
         mqttClient.on('close', function() {
             mqttConnected = false;
-            log('⚠️ MQTT 断开连接', true);
-            updateConnectionStatus(false);
-            
-            reconnectAttempts++;
-            if (reconnectAttempts < MAX_RECONNECT) {
-                const delay = Math.min(5000 * reconnectAttempts, 30000);
-                log('🔄 ' + delay/1000 + '秒后重连 (第' + reconnectAttempts + '次)');
-                setTimeout(connectMqtt, delay);
-            } else {
-                log('⚠️ 重连次数已达上限', true);
-            }
-        });
-
-        mqttClient.on('reconnect', function() {
-            log('🔄 正在重连...');
+            log('⚠️ MQTT 断开', true);
+            $('mqttStatus').textContent = 'MQTT:❌';
+            $('badge').textContent = '离线';
+            $('badge').className = 'badge off';
+            $('remoteStatus').textContent = '状态: ❌ 已断开';
+            $('remoteStatus').style.color = '#fc8181';
+            // 5秒后重连
+            setTimeout(connectMqtt, 5000);
         });
 
         mqttClient.on('offline', function() {
@@ -275,48 +201,33 @@ function connectMqtt() {
 
     } catch (e) {
         log('❌ 连接失败: ' + e.message, true);
-        reconnectAttempts++;
         setTimeout(connectMqtt, 5000);
     }
 }
 
 // ==================== 页面初始化 ====================
 document.addEventListener('DOMContentLoaded', function() {
-    // 按钮事件
-    $('autoBtn').addEventListener('click', function() {
-        setMode('AUTO');
-    });
-    $('manualBtn').addEventListener('click', function() {
-        setMode('MANUAL');
-    });
-
-    // 回车触发应用
-    document.querySelectorAll('.param-row input').forEach(function(input) {
-        input.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                setParams();
-            }
-        });
+    $('autoBtn').addEventListener('click', () => setMode('AUTO'));
+    $('manualBtn').addEventListener('click', () => setMode('MANUAL'));
+    document.querySelectorAll('.param-row input').forEach(input => {
+        input.addEventListener('keypress', function(e) { if (e.key === 'Enter') setParams(); });
     });
 
     log('🚀 系统启动');
-    log('🌐 MQTT 地址: ' + BEMFA_CONFIG.mqttUrl);
+    log('🌐 地址: ' + BEMFA_CONFIG.mqttUrl);
 
-    // 检查 MQTT.js 是否加载
+    // 检查 MQTT.js
     if (typeof mqtt === 'undefined') {
-        log('❌ MQTT.js 库未加载，请检查网络', true);
+        log('❌ MQTT.js 未加载', true);
         return;
     }
 
-    // 延迟连接 MQTT
-    setTimeout(connectMqtt, 1000);
+    connectMqtt();
 
-    // 每10秒自动刷新状态
-    setInterval(function() {
-        if (mqttConnected) {
-            sendCommand('STATUS');
-        }
-    }, 10000);
+    // 每15秒请求状态
+    setInterval(() => {
+        if (mqttConnected) sendCommand('STATUS');
+    }, 15000);
 
     window.onerror = function(msg) {
         log('错误: ' + msg, true);
