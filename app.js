@@ -2,7 +2,7 @@
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    wsUrl: 'wss://bemfa.com/ws',  // 巴法云 WebSocket 地址
+    wsUrl: 'wss://mqtt.bemfa.com/mqtt',  // 巴法云 WebSocket 地址
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
