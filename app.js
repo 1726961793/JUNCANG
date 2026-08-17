@@ -2,16 +2,14 @@
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    // 巴法云 WebSocket 地址（官方端口 9504）
-    wsUrl: 'wss://bemfa.com:9504/wss',
-    // 如果加密连接失败，尝试非加密（去掉 s）
-    // wsUrl: 'ws://bemfa.com:9504/wss',
+    // 非加密 WebSocket（去掉 s）
+    wsUrl: 'ws://bemfa.com:9504/wss?uid=2daa242c1aec4c6da3cc425d6398293e&topic=juncang006',
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
 
 // 局域网配置（降级方案）
-const DEVICE_IP = '192.168.1.105';  // 你的ESP32局域网IP
+const DEVICE_IP = '192.168.1.105';
 const API_BASE = 'http://' + DEVICE_IP;
 
 // ==================== 全局变量 ====================
@@ -222,7 +220,7 @@ async function sendReset() {
     }
 }
 
-// ==================== 巴法云 WebSocket MQTT ====================
+// ==================== 巴法云 WebSocket MQTT（非加密） ====================
 function connectBemfa() {
     if (reconnectAttempts >= MAX_RECONNECT) {
         log('⚠️ 重连次数过多，停止重连', true);
@@ -231,7 +229,7 @@ function connectBemfa() {
     }
 
     try {
-        log('🌐 连接巴法云 MQTT...');
+        log('🌐 连接巴法云 WebSocket (非加密)...');
         $('remoteStatus').textContent = '状态: ⏳ 连接中...';
         
         bemfaWs = new WebSocket(BEMFA_CONFIG.wsUrl);
@@ -245,18 +243,13 @@ function connectBemfa() {
 
         bemfaWs.onopen = function() {
             clearTimeout(timeout);
-            log('WebSocket已连接，发送认证...');
-            const connectMsg = {
-                type: 'connect',
-                userId: BEMFA_CONFIG.userId,
-                topic: BEMFA_CONFIG.topic
-            };
-            bemfaWs.send(JSON.stringify(connectMsg));
+            log('WebSocket 已连接');
         };
 
         bemfaWs.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
+                log('📩 收到: ' + event.data.substring(0, 100));
                 
                 if (data.type === 'connected') {
                     bemfaConnected = true;
@@ -265,6 +258,7 @@ function connectBemfa() {
                     $('remoteStatus').textContent = '状态: ✅ 已连接';
                     $('remoteStatus').style.color = '#48bb78';
                     
+                    // 订阅状态主题
                     const subMsg = {
                         type: 'subscribe',
                         topic: BEMFA_CONFIG.stateTopic
@@ -272,6 +266,7 @@ function connectBemfa() {
                     bemfaWs.send(JSON.stringify(subMsg));
                     log('📡 订阅主题: ' + BEMFA_CONFIG.stateTopic);
                     
+                    // 请求一次状态
                     setTimeout(() => {
                         sendRemoteCommand('STATUS');
                     }, 1000);
