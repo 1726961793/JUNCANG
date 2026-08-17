@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>菌仓控制器</title>
     <link rel="stylesheet" href="style.css">
+    <!-- 引入 MQTT.js 库 - 必须加载 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
 </head>
 <body>
     <!-- 标题 -->
@@ -18,7 +20,7 @@
 
     <!-- 状态栏 -->
     <div class="status-bar">
-        <span id="deviceName">--</span>
+        <span id="deviceName">🌐 远程控制</span>
         <span id="mqttStatus">MQTT:--</span>
         <span id="sensorStatus">传感器:--</span>
     </div>
@@ -131,7 +133,7 @@
         </div>
     </div>
 
-    <!-- 远程控制（巴法云） -->
+    <!-- 远程控制 -->
     <div class="card">
         <div class="section-title">☁️ 远程控制</div>
         <div style="font-size:13px;color:#4a5568;margin-bottom:8px;">
