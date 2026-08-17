@@ -1,9 +1,8 @@
 // ==================== 配置 ====================
-// 巴法云配置
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    wsUrl: 'wss://mqtt.bemfa.com/mqtt',
+    wsUrl: 'wss://bemfa.com/ws',  // 巴法云 WebSocket 地址
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
@@ -18,6 +17,8 @@ let isManualMode = false;
 let updateTimer = null;
 let bemfaWs = null;
 let bemfaConnected = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 5;
 
 // ==================== DOM 引用 ====================
 const $ = id => document.getElementById(id);
@@ -63,12 +64,16 @@ async function apiFetch(endpoint, options = {}) {
             headers: {
                 'Content-Type': 'application/json',
                 ...(options.headers || {})
-            }
+            },
+            // 添加超时
+            signal: AbortSignal.timeout(5000)
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return await res.json();
     } catch (e) {
-        log('请求失败: ' + e.message, true);
+        if (e.name !== 'AbortError') {
+            log('请求失败: ' + e.message, true);
+        }
         return null;
     }
 }
@@ -210,11 +215,25 @@ async function sendReset() {
 
 // ==================== 巴法云 WebSocket MQTT ====================
 function connectBemfa() {
+    if (reconnectAttempts >= MAX_RECONNECT) {
+        log('⚠️ 重连次数过多，停止重连', true);
+        return;
+    }
+
     try {
         log('🌐 连接巴法云 MQTT...');
         bemfaWs = new WebSocket(BEMFA_CONFIG.wsUrl);
 
+        // 设置超时
+        const timeout = setTimeout(() => {
+            if (bemfaWs && bemfaWs.readyState !== WebSocket.OPEN) {
+                log('⚠️ 连接超时', true);
+                bemfaWs.close();
+            }
+        }, 10000);
+
         bemfaWs.onopen = function() {
+            clearTimeout(timeout);
             log('WebSocket已连接，发送认证...');
             const connectMsg = {
                 type: 'connect',
@@ -227,8 +246,11 @@ function connectBemfa() {
         bemfaWs.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
+                log('📩 收到: ' + event.data.substring(0, 100));
+                
                 if (data.type === 'connected') {
                     bemfaConnected = true;
+                    reconnectAttempts = 0;
                     log('✅ 巴法云连接成功');
                     const remoteStatus = $('remoteStatus');
                     if (remoteStatus) {
@@ -243,14 +265,13 @@ function connectBemfa() {
                     bemfaWs.send(JSON.stringify(subMsg));
                     log('📡 订阅主题: ' + BEMFA_CONFIG.stateTopic);
                     // 请求一次状态
-                    sendRemoteCommand('STATUS');
+                    setTimeout(() => sendRemoteCommand('STATUS'), 500);
                 }
-                if (data.type === 'message') {
+                else if (data.type === 'message') {
                     const payload = data.payload || '';
                     log('📩 收到状态数据');
                     try {
                         const jsonData = JSON.parse(payload);
-                        // 更新UI
                         if (jsonData.temp !== undefined) {
                             $('st').textContent = jsonData.temp.toFixed(1);
                         }
@@ -269,6 +290,7 @@ function connectBemfa() {
                             $('modeBadge').textContent = mode;
                             $('modeBadge').className = 'mode-badge ' + (mode === 'MANUAL' ? 'manual' : 'auto');
                             isManualMode = (mode === 'MANUAL');
+                            currentMode = mode;
                         }
                         if (jsonData.tMin !== undefined) {
                             $('tMin').value = jsonData.tMin;
@@ -283,31 +305,39 @@ function connectBemfa() {
                         // 忽略解析错误
                     }
                 }
-                if (data.type === 'ping') {
+                else if (data.type === 'ping') {
                     bemfaWs.send(JSON.stringify({ type: 'pong' }));
+                }
+                else if (data.type === 'error') {
+                    log('❌ 巴法云错误: ' + (data.msg || '未知错误'), true);
                 }
             } catch (e) {
                 log('解析消息失败: ' + e.message, true);
             }
         };
 
-        bemfaWs.onclose = function() {
+        bemfaWs.onclose = function(event) {
             bemfaConnected = false;
-            log('⚠️ 巴法云断开，5秒后重连', true);
+            clearTimeout(timeout);
+            log('⚠️ 巴法云断开 (code: ' + event.code + ')', true);
             const remoteStatus = $('remoteStatus');
             if (remoteStatus) {
                 remoteStatus.textContent = '状态: ❌ 已断开';
                 remoteStatus.style.color = '#fc8181';
             }
-            setTimeout(connectBemfa, 5000);
+            reconnectAttempts++;
+            const delay = Math.min(3000 * reconnectAttempts, 30000);
+            log('🔄 ' + delay/1000 + '秒后重连 (第' + reconnectAttempts + '次)');
+            setTimeout(connectBemfa, delay);
         };
 
         bemfaWs.onerror = function(error) {
-            log('❌ WebSocket错误: ' + error.message, true);
+            log('❌ WebSocket错误: ' + (error.message || '未知错误'), true);
         };
 
     } catch (e) {
         log('❌ 连接失败: ' + e.message, true);
+        reconnectAttempts++;
         setTimeout(connectBemfa, 5000);
     }
 }
@@ -328,7 +358,7 @@ function sendRemoteCommand(command) {
         if (remoteStatus) {
             remoteStatus.textContent = '状态: 指令已发送 ' + new Date().toLocaleTimeString();
         }
-        return;
+        return true;
     }
 
     // 降级方案：通过局域网ESP32转发
@@ -341,6 +371,7 @@ function sendRemoteCommand(command) {
                 log('❌ 局域网转发失败', true);
             }
         });
+    return false;
 }
 
 // ==================== 页面初始化 ====================
@@ -364,8 +395,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // 尝试局域网连接
     fetchStatus();
 
-    // 连接巴法云
-    connectBemfa();
+    // 延迟连接巴法云
+    setTimeout(connectBemfa, 2000);
 
     // 每3秒自动刷新
     updateTimer = setInterval(fetchStatus, 3000);
