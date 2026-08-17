@@ -2,13 +2,16 @@
 const BEMFA_CONFIG = {
     userId: '2daa242c1aec4c6da3cc425d6398293e',
     topic: 'juncang006',
-    wsUrl: 'wss://mqtt.bemfa.com/mqtt',  // 巴法云 WebSocket 地址
+    // 巴法云 WebSocket 地址（官方端口 9504）
+    wsUrl: 'wss://bemfa.com:9504/wss',
+    // 如果加密连接失败，尝试非加密（去掉 s）
+    // wsUrl: 'ws://bemfa.com:9504/wss',
     setTopic: 'juncang006/set',
     stateTopic: 'juncang006/state'
 };
 
-// 局域网配置（用于与ESP32直连）
-const DEVICE_IP = '192.168.1.100';  // 修改为你的ESP32 IP
+// 局域网配置（降级方案）
+const DEVICE_IP = '192.168.1.105';  // 你的ESP32局域网IP
 const API_BASE = 'http://' + DEVICE_IP;
 
 // ==================== 全局变量 ====================
@@ -18,7 +21,7 @@ let updateTimer = null;
 let bemfaWs = null;
 let bemfaConnected = false;
 let reconnectAttempts = 0;
-const MAX_RECONNECT = 5;
+const MAX_RECONNECT = 10;
 
 // ==================== DOM 引用 ====================
 const $ = id => document.getElementById(id);
@@ -42,7 +45,7 @@ function updateRelays(relay) {
     names.forEach((n, i) => {
         const el = $('r-' + n);
         if (!el) return;
-        const on = relay[i] === 1;
+        const on = relay && relay[i] === 1;
         el.className = 'relay-item ' + (on ? 'on' : 'off');
         const statusEl = el.querySelector('.status');
         if (statusEl) {
@@ -59,49 +62,55 @@ function updateRelays(relay) {
 async function apiFetch(endpoint, options = {}) {
     try {
         const url = API_BASE + endpoint;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        
         const res = await fetch(url, {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
                 ...(options.headers || {})
             },
-            // 添加超时
-            signal: AbortSignal.timeout(5000)
+            signal: controller.signal
         });
+        clearTimeout(timeout);
+        
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return await res.json();
     } catch (e) {
-        if (e.name !== 'AbortError') {
-            log('请求失败: ' + e.message, true);
+        if (e.name === 'AbortError') {
+            log('请求超时', true);
         }
         return null;
     }
 }
 
-// ==================== 获取状态 ====================
+// ==================== 获取状态（局域网） ====================
 async function fetchStatus() {
     log('刷新状态...');
     const data = await apiFetch('/status');
     if (!data) {
         $('badge').textContent = '离线';
         $('badge').className = 'badge off';
-        $('statusText').textContent = '❌ 连接失败';
+        $('statusText').textContent = '❌ 连接失败 (请检查IP)';
         return;
     }
 
-    $('st').textContent = data.temp.toFixed(1);
-    $('sh').textContent = data.humi.toFixed(1);
-    $('sc').textContent = data.co2;
+    if (data.temp !== undefined) $('st').textContent = data.temp.toFixed(1);
+    if (data.humi !== undefined) $('sh').textContent = data.humi.toFixed(1);
+    if (data.co2 !== undefined) $('sc').textContent = data.co2;
 
     const sensorOk = data.sensorValid !== undefined ? data.sensorValid : true;
     $('sensorStatus').textContent = sensorOk ? '传感器:✅' : '传感器:❌';
 
-    $('tMin').value = data.tMin;
-    $('tMax').value = data.tMax;
-    $('hMin').value = data.hMin;
-    $('hMax').value = data.hMax;
-    $('cMin').value = data.cMin;
-    $('cMax').value = data.cMax;
+    if (data.tMin !== undefined) {
+        $('tMin').value = data.tMin;
+        $('tMax').value = data.tMax;
+        $('hMin').value = data.hMin;
+        $('hMax').value = data.hMax;
+        $('cMin').value = data.cMin;
+        $('cMax').value = data.cMax;
+    }
 
     currentMode = data.mode || 'AUTO';
     isManualMode = (currentMode === 'MANUAL');
@@ -217,20 +226,22 @@ async function sendReset() {
 function connectBemfa() {
     if (reconnectAttempts >= MAX_RECONNECT) {
         log('⚠️ 重连次数过多，停止重连', true);
+        $('remoteStatus').textContent = '状态: ❌ 连接失败（已停止重连）';
         return;
     }
 
     try {
         log('🌐 连接巴法云 MQTT...');
+        $('remoteStatus').textContent = '状态: ⏳ 连接中...';
+        
         bemfaWs = new WebSocket(BEMFA_CONFIG.wsUrl);
 
-        // 设置超时
         const timeout = setTimeout(() => {
             if (bemfaWs && bemfaWs.readyState !== WebSocket.OPEN) {
                 log('⚠️ 连接超时', true);
                 bemfaWs.close();
             }
-        }, 10000);
+        }, 15000);
 
         bemfaWs.onopen = function() {
             clearTimeout(timeout);
@@ -246,44 +257,33 @@ function connectBemfa() {
         bemfaWs.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
-                log('📩 收到: ' + event.data.substring(0, 100));
                 
                 if (data.type === 'connected') {
                     bemfaConnected = true;
                     reconnectAttempts = 0;
                     log('✅ 巴法云连接成功');
-                    const remoteStatus = $('remoteStatus');
-                    if (remoteStatus) {
-                        remoteStatus.textContent = '状态: ✅ 已连接';
-                        remoteStatus.style.color = '#48bb78';
-                    }
-                    // 订阅状态主题
+                    $('remoteStatus').textContent = '状态: ✅ 已连接';
+                    $('remoteStatus').style.color = '#48bb78';
+                    
                     const subMsg = {
                         type: 'subscribe',
                         topic: BEMFA_CONFIG.stateTopic
                     };
                     bemfaWs.send(JSON.stringify(subMsg));
                     log('📡 订阅主题: ' + BEMFA_CONFIG.stateTopic);
-                    // 请求一次状态
-                    setTimeout(() => sendRemoteCommand('STATUS'), 500);
+                    
+                    setTimeout(() => {
+                        sendRemoteCommand('STATUS');
+                    }, 1000);
                 }
                 else if (data.type === 'message') {
                     const payload = data.payload || '';
-                    log('📩 收到状态数据');
                     try {
                         const jsonData = JSON.parse(payload);
-                        if (jsonData.temp !== undefined) {
-                            $('st').textContent = jsonData.temp.toFixed(1);
-                        }
-                        if (jsonData.humi !== undefined) {
-                            $('sh').textContent = jsonData.humi.toFixed(1);
-                        }
-                        if (jsonData.co2 !== undefined) {
-                            $('sc').textContent = jsonData.co2;
-                        }
-                        if (jsonData.relay) {
-                            updateRelays(jsonData.relay);
-                        }
+                        if (jsonData.temp !== undefined) $('st').textContent = jsonData.temp.toFixed(1);
+                        if (jsonData.humi !== undefined) $('sh').textContent = jsonData.humi.toFixed(1);
+                        if (jsonData.co2 !== undefined) $('sc').textContent = jsonData.co2;
+                        if (jsonData.relay) updateRelays(jsonData.relay);
                         if (jsonData.mode) {
                             const mode = jsonData.mode;
                             $('modeDisplay').textContent = mode;
@@ -301,6 +301,7 @@ function connectBemfa() {
                             $('cMax').value = jsonData.cMax;
                         }
                         $('lastUpdate').textContent = new Date().toLocaleTimeString();
+                        log('📊 数据已更新');
                     } catch (e) {
                         // 忽略解析错误
                     }
@@ -320,15 +321,18 @@ function connectBemfa() {
             bemfaConnected = false;
             clearTimeout(timeout);
             log('⚠️ 巴法云断开 (code: ' + event.code + ')', true);
-            const remoteStatus = $('remoteStatus');
-            if (remoteStatus) {
-                remoteStatus.textContent = '状态: ❌ 已断开';
-                remoteStatus.style.color = '#fc8181';
-            }
+            $('remoteStatus').textContent = '状态: ❌ 已断开';
+            $('remoteStatus').style.color = '#fc8181';
+            
             reconnectAttempts++;
-            const delay = Math.min(3000 * reconnectAttempts, 30000);
-            log('🔄 ' + delay/1000 + '秒后重连 (第' + reconnectAttempts + '次)');
-            setTimeout(connectBemfa, delay);
+            if (reconnectAttempts < MAX_RECONNECT) {
+                const delay = Math.min(5000 * reconnectAttempts, 30000);
+                log('🔄 ' + delay/1000 + '秒后重连 (第' + reconnectAttempts + '次)');
+                setTimeout(connectBemfa, delay);
+            } else {
+                log('⚠️ 重连次数已达上限', true);
+                $('remoteStatus').textContent = '状态: ❌ 连接失败';
+            }
         };
 
         bemfaWs.onerror = function(error) {
@@ -354,10 +358,7 @@ function sendRemoteCommand(command) {
         };
         bemfaWs.send(JSON.stringify(msg));
         log('✅ 远程指令已发送');
-        const remoteStatus = $('remoteStatus');
-        if (remoteStatus) {
-            remoteStatus.textContent = '状态: 指令已发送 ' + new Date().toLocaleTimeString();
-        }
+        $('remoteStatus').textContent = '状态: 指令已发送 ' + new Date().toLocaleTimeString();
         return true;
     }
 
@@ -376,11 +377,9 @@ function sendRemoteCommand(command) {
 
 // ==================== 页面初始化 ====================
 document.addEventListener('DOMContentLoaded', function() {
-    // 模式切换按钮
     $('autoBtn').addEventListener('click', () => setMode('AUTO'));
     $('manualBtn').addEventListener('click', () => setMode('MANUAL'));
 
-    // 输入框回车触发应用
     document.querySelectorAll('.param-row input').forEach(input => {
         input.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
@@ -389,26 +388,21 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // 启动
     log('🚀 系统启动');
+    log('📡 设备IP: ' + DEVICE_IP);
+    log('🌐 巴法云地址: ' + BEMFA_CONFIG.wsUrl);
 
-    // 尝试局域网连接
     fetchStatus();
-
-    // 延迟连接巴法云
     setTimeout(connectBemfa, 2000);
 
-    // 每3秒自动刷新
-    updateTimer = setInterval(fetchStatus, 3000);
+    updateTimer = setInterval(fetchStatus, 5000);
 
-    // 页面可见时刷新
     document.addEventListener('visibilitychange', function() {
         if (!document.hidden) {
             fetchStatus();
         }
     });
 
-    // 错误处理
     window.onerror = function(msg, url, line, col, error) {
         log('错误: ' + msg, true);
         return false;
