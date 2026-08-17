@@ -43,7 +43,13 @@ function updateRelays(relay) {
 }
 
 function updateUI(data) {
-    if (!data) return;
+    if (!data) {
+        log('⚠️ 收到空数据', true);
+        return;
+    }
+    
+    log('📊 解析数据: ' + JSON.stringify(data));
+    
     if (data.temp !== undefined) $('st').textContent = data.temp.toFixed(1);
     if (data.humi !== undefined) $('sh').textContent = data.humi.toFixed(1);
     if (data.co2 !== undefined) $('sc').textContent = data.co2;
@@ -64,7 +70,6 @@ function updateUI(data) {
         $('cMax').value = data.cMax;
     }
     $('lastUpdate').textContent = new Date().toLocaleTimeString();
-    // 更新传感器状态
     const sensorOk = data.sensorValid !== undefined ? data.sensorValid : true;
     $('sensorStatus').textContent = sensorOk ? '传感器:✅' : '传感器:❌';
 }
@@ -72,9 +77,7 @@ function updateUI(data) {
 // ==================== 发送指令 ====================
 function sendCommand(command) {
     if (!mqttConnected || !mqttClient) {
-        log('⚠️ MQTT 未连接，指令加入队列', true);
-        // 尝试重新连接
-        if (!mqttConnected) connectMqtt();
+        log('⚠️ MQTT 未连接', true);
         return;
     }
     log('📡 发送: ' + command);
@@ -127,14 +130,13 @@ function connectMqtt() {
         log('🌐 连接巴法云 MQTT...');
         $('remoteStatus').textContent = '状态: ⏳ 连接中...';
 
-        // 使用与 MQTTX 完全相同的配置
         const options = {
             clientId: BEMFA_CONFIG.userId,
             username: '',
             password: '',
             keepalive: 60,
             clean: true,
-            protocolVersion: 4,  // MQTT 3.1.1
+            protocolVersion: 4,
             reconnectPeriod: 0,
             connectTimeout: 15000
         };
@@ -162,6 +164,13 @@ function connectMqtt() {
                 }
             });
 
+            // 订阅通配符，查看所有消息（调试用）
+            mqttClient.subscribe('juncang006/#', { qos: 0 }, function(err) {
+                if (!err) {
+                    log('📡 订阅: juncang006/# (调试模式)');
+                }
+            });
+
             // 请求状态
             setTimeout(() => sendCommand('STATUS'), 500);
         });
@@ -169,14 +178,23 @@ function connectMqtt() {
         mqttClient.on('message', function(topic, message) {
             try {
                 const payload = message.toString();
+                log('📩 [' + topic + '] ' + payload);
+                
+                // 显示在状态栏
+                $('mqttStatus').textContent = 'MQTT:📩';
+                
                 if (topic === BEMFA_CONFIG.stateTopic) {
                     try {
                         const data = JSON.parse(payload);
                         updateUI(data);
                         log('📊 数据已更新');
-                    } catch (e) {}
+                    } catch (e) {
+                        log('⚠️ JSON解析失败: ' + e.message, true);
+                    }
                 }
-            } catch (e) {}
+            } catch (e) {
+                log('⚠️ 处理消息失败: ' + e.message, true);
+            }
         });
 
         mqttClient.on('error', function(error) {
@@ -191,7 +209,6 @@ function connectMqtt() {
             $('badge').className = 'badge off';
             $('remoteStatus').textContent = '状态: ❌ 已断开';
             $('remoteStatus').style.color = '#fc8181';
-            // 5秒后重连
             setTimeout(connectMqtt, 5000);
         });
 
@@ -215,8 +232,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     log('🚀 系统启动');
     log('🌐 地址: ' + BEMFA_CONFIG.mqttUrl);
+    log('📡 私钥: ' + BEMFA_CONFIG.userId);
+    log('📡 主题: ' + BEMFA_CONFIG.topic);
 
-    // 检查 MQTT.js
     if (typeof mqtt === 'undefined') {
         log('❌ MQTT.js 未加载', true);
         return;
